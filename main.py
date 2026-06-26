@@ -59,33 +59,23 @@ class PollStore:
             return {"polls": {}, "counter": 0, "closed": {}}
 
     async def _save(self):
-        async with self._lock:
-            tmp = self._file.with_suffix(".tmp")
-            try:
-                with open(tmp, "w", encoding="utf-8") as f:
-                    json.dump(self._data, f, ensure_ascii=False, indent=2)
-                tmp.replace(self._file)
-            except OSError as e:
-                logger.error(f"保存投票数据失败: {e}")
+        tmp = self._file.with_suffix(".tmp")
+        try:
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(self._data, f, ensure_ascii=False, indent=2)
+            tmp.replace(self._file)
+        except OSError as e:
+            logger.error(f"保存投票数据失败: {e}")
 
-    def _next_id(self) -> int:
+    async def _next_id(self) -> int:
         self._data["counter"] += 1
         return self._data["counter"]
-
-    def _schedule_save(self):
-        """调度异步保存（在无法 await 的同步上下文中使用）"""
-        try:
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
-                loop.create_task(self._save())
-        except RuntimeError:
-            pass  # 没有事件循环时跳过保存
 
     @staticmethod
     def _utcnow_ts() -> float:
         return datetime.now(timezone.utc).timestamp()
 
-    def create_poll(
+    async def create_poll(
         self,
         question: str,
         options: list,
@@ -96,25 +86,26 @@ class PollStore:
         anonymous: bool = False,
         expiry: Optional[int] = None,
     ) -> int:
-        poll_id = self._next_id()
-        expiry_time = None
-        if expiry and expiry > 0:
-            expiry_time = self._utcnow_ts() + expiry * 60
+        async with self._lock:
+            poll_id = await self._next_id()
+            expiry_time = None
+            if expiry and expiry > 0:
+                expiry_time = self._utcnow_ts() + expiry * 60
 
-        self._data["polls"][str(poll_id)] = {
-            "id": poll_id,
-            "question": question,
-            "options": [{"text": opt, "votes": []} for opt in options],
-            "creator_id": creator_id,
-            "creator_name": creator_name,
-            "session_id": session_id,
-            "multi": multi,
-            "anonymous": anonymous,
-            "expiry": expiry_time,
-            "created_at": datetime.now(timezone.utc).isoformat(),
-            "total_votes": 0,
-        }
-        self._schedule_save()
+            self._data["polls"][str(poll_id)] = {
+                "id": poll_id,
+                "question": question,
+                "options": [{"text": opt, "votes": []} for opt in options],
+                "creator_id": creator_id,
+                "creator_name": creator_name,
+                "session_id": session_id,
+                "multi": multi,
+                "anonymous": anonymous,
+                "expiry": expiry_time,
+                "created_at": datetime.now(timezone.utc).isoformat(),
+                "total_votes": 0,
+            }
+            await self._save()
         return poll_id
 
     def get_poll(self, poll_id: str) -> Optional[dict]:
@@ -137,44 +128,46 @@ class PollStore:
             polls.append(poll)
         return sorted(polls, key=lambda p: p["id"], reverse=True)
 
-    def vote(self, poll_id: str, option_index: int, user_id: str, user_name: str) -> tuple[bool, str]:
-        poll = self._data["polls"].get(poll_id)
-        if not poll:
-            return False, "投票不存在或已过期"
+    async def vote(self, poll_id: str, option_index: int, user_id: str, user_name: str) -> tuple[bool, str]:
+        async with self._lock:
+            poll = self._data["polls"].get(poll_id)
+            if not poll:
+                return False, "投票不存在或已过期"
 
-        if poll.get("expiry"):
-            if self._utcnow_ts() > poll["expiry"]:
-                return False, "投票已截止"
+            if poll.get("expiry"):
+                if self._utcnow_ts() > poll["expiry"]:
+                    return False, "投票已截止"
 
-        if option_index < 0 or option_index >= len(poll["options"]):
-            return False, f"选项编号无效，有效范围 1-{len(poll['options'])}"
+            if option_index < 0 or option_index >= len(poll["options"]):
+                return False, f"选项编号无效，有效范围 1-{len(poll['options'])}"
 
-        option = poll["options"][option_index]
+            option = poll["options"][option_index]
 
-        if any(v["user_id"] == user_id for v in option["votes"]):
-            return False, "你已经投过这个选项了"
+            if any(v["user_id"] == user_id for v in option["votes"]):
+                return False, "你已经投过这个选项了"
 
-        if not poll["multi"]:
-            for opt in poll["options"]:
-                opt["votes"] = [v for v in opt["votes"] if v["user_id"] != user_id]
+            if not poll["multi"]:
+                for opt in poll["options"]:
+                    opt["votes"] = [v for v in opt["votes"] if v["user_id"] != user_id]
 
-        option["votes"].append({
-            "user_id": user_id,
-            "user_name": user_name,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-        })
-        poll["total_votes"] = sum(len(o["votes"]) for o in poll["options"])
-        self._schedule_save()
+            option["votes"].append({
+                "user_id": user_id,
+                "user_name": user_name,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            })
+            poll["total_votes"] = sum(len(o["votes"]) for o in poll["options"])
+            await self._save()
         return True, f"投票成功！你选择了: {option['text']}"
 
-    def close_poll(self, poll_id: str, user_id: str) -> tuple[bool, str]:
-        poll = self._data["polls"].get(poll_id)
-        if not poll:
-            return False, "投票不存在"
-        if poll["creator_id"] != user_id:
-            return False, "只有创建者才能关闭投票"
-        self._data["closed"][poll_id] = self._data["polls"].pop(poll_id)
-        self._schedule_save()
+    async def close_poll(self, poll_id: str, user_id: str) -> tuple[bool, str]:
+        async with self._lock:
+            poll = self._data["polls"].get(poll_id)
+            if not poll:
+                return False, "投票不存在"
+            if poll["creator_id"] != user_id:
+                return False, "只有创建者才能关闭投票"
+            self._data["closed"][poll_id] = self._data["polls"].pop(poll_id)
+            await self._save()
         return True, "投票已关闭"
 
     def format_result(self, poll: dict) -> str:
@@ -308,31 +301,45 @@ class PollPlugin(Star):
     async def _cmd_create(self, event: AstrMessageEvent):
         text = event.message_str.strip()
 
-        multi = " --multi" in text or " --多选" in text
-        anonymous = " --anon" in text or " --匿名" in text
+        # 解析参数标记（使用单词边界匹配更准确）
+        multi = bool(re.search(r'(?:^|\s)--(?:multi|多选)(?:\s|$)', text))
+        anonymous = bool(re.search(r'(?:^|\s)--(?:anon|匿名)(?:\s|$)', text))
         expiry = None
 
-        time_match = re.search(r'--time\s+(\d+)', text)
+        time_match = re.search(r'(?:^|\s)--time\s+(\d+)(?:\s|$)', text)
         if time_match:
-            expiry = int(time_match.group(1))
+            try:
+                expiry = int(time_match.group(1))
+            except ValueError:
+                yield event.plain_result("❌ --time 参数必须是数字（分钟）")
+                return
 
-        clean = text
-        for flag in ["--multi", "--多选", "--anon", "--匿名"]:
-            clean = clean.replace(flag, "")
-        clean = re.sub(r'--time\s+\d+', '', clean)
+        # 安全清理参数标记（只替换完整单词，不破坏选项内的文字）
+        clean = re.sub(
+            r'(?:^|\s)--(?:multi|多选|anon|匿名)(?=\s|$)',
+            '', text
+        )
+        clean = re.sub(r'(?:^|\s)--time\s+\d+(?=\s|$)', '', clean)
         clean = clean.strip()
 
+        # 解析引号内的内容
         parts = re.findall(r'"([^"]*)"', clean)
         if len(parts) < 3:
-            yield event.plain_result(
-                "❌ 格式错误！\n"
-                "用法: /poll create \"问题\" \"选项1\" \"选项2\" ...\n"
-                "示例: /poll create \"今晚吃什么?\" \"火锅\" \"烤肉\" \"炒菜\""
-            )
-            return
-
-        question = parts[0]
-        options = parts[1:]
+            # 尝试用空格分割（用户可能没加引号）
+            words = [w for w in clean.split() if w]
+            if len(words) >= 3:
+                question = words[1]
+                options = words[2:]
+            else:
+                yield event.plain_result(
+                    "❌ 格式错误！\n"
+                    "用法: /poll create \"问题\" \"选项1\" \"选项2\" ...\n"
+                    "示例: /poll create \"今晚吃什么?\" \"火锅\" \"烤肉\" \"炒菜\""
+                )
+                return
+        else:
+            question = parts[0]
+            options = parts[1:]
 
         if len(options) < 2:
             yield event.plain_result("❌ 至少需要 2 个选项")
@@ -342,7 +349,7 @@ class PollPlugin(Star):
             yield event.plain_result("❌ 最多 10 个选项")
             return
 
-        poll_id = self.store.create_poll(
+        poll_id = await self.store.create_poll(
             question=question,
             options=options,
             creator_id=event.get_sender_id(),
@@ -392,7 +399,7 @@ class PollPlugin(Star):
             yield event.plain_result("❌ 选项编号必须是数字")
             return
 
-        ok, msg = self.store.vote(
+        ok, msg = await self.store.vote(
             poll_id,
             option_idx,
             event.get_sender_id(),
@@ -454,7 +461,7 @@ class PollPlugin(Star):
             return
 
         poll_id = parts[2]
-        ok, msg = self.store.close_poll(poll_id, event.get_sender_id())
+        ok, msg = await self.store.close_poll(poll_id, event.get_sender_id())
 
         if ok:
             poll = self.store._data["closed"].get(poll_id)
@@ -487,7 +494,7 @@ class PollPlugin(Star):
             yield event.plain_result("❌ 选项编号必须是数字")
             return
 
-        ok, msg = self.store.vote(
+        ok, msg = await self.store.vote(
             poll_id, option_idx,
             event.get_sender_id(),
             event.get_sender_name(),
@@ -512,6 +519,7 @@ class PollPlugin(Star):
             yield event.plain_result("📊 投票管理器\n输入 /投票 help 查看帮助")
             return
 
+        action = after.split()[0] if after.split() else None
         event.message_str = f"/poll {after}"
-        async for result in self.poll(event):
+        async for result in self.poll(event, action):
             yield result
