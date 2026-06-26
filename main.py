@@ -8,7 +8,7 @@ AstrBot 投票插件 PollStar
   - 公开/匿名投票
   - 定时截止
   - 实时查看结果
-  - 数据持久化
+  - 数据持久化 (JSON)
 
 命令:
   /poll create "问题" "选项1" "选项2" ...
@@ -17,13 +17,16 @@ AstrBot 投票插件 PollStar
   /poll list
   /poll close <id>
   /poll help
+
+快捷命令:
+  /vote <id> <选项号>
+  /投票 ...
 """
 
 import asyncio
 import json
 import os
 import re
-import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -31,7 +34,6 @@ from typing import Optional
 from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api.star import Context, Star, register
 from astrbot.api import logger
-from astrbot.api.message_components import Plain
 
 
 # ── 持久化存储 ──────────────────────────────────────────────
@@ -70,6 +72,19 @@ class PollStore:
         self._data["counter"] += 1
         return self._data["counter"]
 
+    def _schedule_save(self):
+        """调度异步保存（在无法 await 的同步上下文中使用）"""
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                loop.create_task(self._save())
+        except RuntimeError:
+            pass  # 没有事件循环时跳过保存
+
+    @staticmethod
+    def _utcnow_ts() -> float:
+        return datetime.now(timezone.utc).timestamp()
+
     def create_poll(
         self,
         question: str,
@@ -84,7 +99,7 @@ class PollStore:
         poll_id = self._next_id()
         expiry_time = None
         if expiry and expiry > 0:
-            expiry_time = (datetime.now(timezone.utc).timestamp() + expiry * 60)
+            expiry_time = self._utcnow_ts() + expiry * 60
 
         self._data["polls"][str(poll_id)] = {
             "id": poll_id,
@@ -99,30 +114,20 @@ class PollStore:
             "created_at": datetime.now(timezone.utc).isoformat(),
             "total_votes": 0,
         }
-        # Save to file
-        import asyncio
-        try:
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
-                loop.create_task(self._save())
-            else:
-                loop.run_until_complete(self._save())
-        except:
-            pass
+        self._schedule_save()
         return poll_id
 
     def get_poll(self, poll_id: str) -> Optional[dict]:
         poll = self._data["polls"].get(poll_id)
         if not poll:
             return None
-        # 检查是否过期
         if poll.get("expiry"):
-            if datetime.now(timezone.utc).timestamp() > poll["expiry"]:
+            if self._utcnow_ts() > poll["expiry"]:
                 return None
         return poll
 
     def get_active_polls(self, session_id: str = None) -> list:
-        now_ts = datetime.now(timezone.utc).timestamp()
+        now_ts = self._utcnow_ts()
         polls = []
         for pid, poll in self._data["polls"].items():
             if poll.get("expiry") and now_ts > poll["expiry"]:
@@ -138,7 +143,7 @@ class PollStore:
             return False, "投票不存在或已过期"
 
         if poll.get("expiry"):
-            if datetime.now(timezone.utc).timestamp() > poll["expiry"]:
+            if self._utcnow_ts() > poll["expiry"]:
                 return False, "投票已截止"
 
         if option_index < 0 or option_index >= len(poll["options"]):
@@ -146,29 +151,20 @@ class PollStore:
 
         option = poll["options"][option_index]
 
-        # 检查是否已经投过这个选项
         if any(v["user_id"] == user_id for v in option["votes"]):
             return False, "你已经投过这个选项了"
 
         if not poll["multi"]:
-            # 单选：检查是否投过其他选项，先移除
             for opt in poll["options"]:
                 opt["votes"] = [v for v in opt["votes"] if v["user_id"] != user_id]
 
-        # 投票
         option["votes"].append({
             "user_id": user_id,
             "user_name": user_name,
             "timestamp": datetime.now(timezone.utc).isoformat(),
         })
         poll["total_votes"] = sum(len(o["votes"]) for o in poll["options"])
-        import asyncio
-        try:
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
-                loop.create_task(self._save())
-        except:
-            pass
+        self._schedule_save()
         return True, f"投票成功！你选择了: {option['text']}"
 
     def close_poll(self, poll_id: str, user_id: str) -> tuple[bool, str]:
@@ -177,15 +173,8 @@ class PollStore:
             return False, "投票不存在"
         if poll["creator_id"] != user_id:
             return False, "只有创建者才能关闭投票"
-        # Move to closed
         self._data["closed"][poll_id] = self._data["polls"].pop(poll_id)
-        import asyncio
-        try:
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
-                loop.create_task(self._save())
-        except:
-            pass
+        self._schedule_save()
         return True, "投票已关闭"
 
     def format_result(self, poll: dict) -> str:
@@ -198,7 +187,7 @@ class PollStore:
         ]
 
         if poll.get("expiry"):
-            remaining = poll["expiry"] - datetime.now(timezone.utc).timestamp()
+            remaining = poll["expiry"] - self._utcnow_ts()
             if remaining > 0:
                 mins = int(remaining / 60)
                 lines.append(f"⏱ 剩余 {mins} 分钟")
@@ -319,24 +308,20 @@ class PollPlugin(Star):
     async def _cmd_create(self, event: AstrMessageEvent):
         text = event.message_str.strip()
 
-        # 解析参数
         multi = " --multi" in text or " --多选" in text
         anonymous = " --anon" in text or " --匿名" in text
         expiry = None
 
-        # 解析 --time N
         time_match = re.search(r'--time\s+(\d+)', text)
         if time_match:
             expiry = int(time_match.group(1))
 
-        # 清理参数标记
         clean = text
         for flag in ["--multi", "--多选", "--anon", "--匿名"]:
             clean = clean.replace(flag, "")
         clean = re.sub(r'--time\s+\d+', '', clean)
         clean = clean.strip()
 
-        # 解析引号内的内容
         parts = re.findall(r'"([^"]*)"', clean)
         if len(parts) < 3:
             yield event.plain_result(
@@ -368,7 +353,6 @@ class PollPlugin(Star):
             expiry=expiry,
         )
 
-        poll = self.store.get_poll(str(poll_id))
         msg = (
             f"📊 **投票已创建！**\n"
             f"━━━━━━━━━━━━━━━━\n"
@@ -393,7 +377,6 @@ class PollPlugin(Star):
 
     async def _cmd_vote(self, event: AstrMessageEvent):
         parts = event.message_str.strip().split()
-        # /poll vote <id> <option_number>
         if len(parts) < 4:
             yield event.plain_result(
                 "❌ 用法: /poll vote <投票ID> <选项编号>\n"
@@ -454,7 +437,7 @@ class PollPlugin(Star):
             multi = "多选" if p.get("multi") else "单选"
             expiry = ""
             if p.get("expiry"):
-                remaining = p["expiry"] - datetime.now(timezone.utc).timestamp()
+                remaining = p["expiry"] - self.store._utcnow_ts()
                 if remaining > 0:
                     expiry = f" ⏱{int(remaining/60)}分钟"
 
@@ -482,13 +465,7 @@ class PollPlugin(Star):
         else:
             yield event.plain_result(f"❌ {msg}")
 
-
-# ── 别名命令 ──
-
-@register("astrbot_plugin_poll_shortcut", "ownisjiang", "投票快捷命令", "1.0.0")
-class PollShortcutPlugin(Star):
-    def __init__(self, context: Context, config: dict = None):
-        super().__init__(context)
+    # ── 快捷命令 ──
 
     @filter.command("vote")
     async def vote_shortcut(self, event: AstrMessageEvent):
@@ -496,15 +473,45 @@ class PollShortcutPlugin(Star):
         parts = event.message_str.strip().split()
         if len(parts) < 3:
             yield event.plain_result(
+                "📊 快捷投票\n"
                 "用法: /vote <投票ID> <选项编号>\n"
-                "查看投票: /poll list"
+                "示例: /vote 1 2\n"
+                "查看活跃投票: /poll list"
             )
             return
-        # 重新构造为 /poll vote 命令
-        event.message_str = f"/poll vote {parts[1]} {parts[2]}"
+
+        poll_id = parts[1]
+        try:
+            option_idx = int(parts[2]) - 1
+        except ValueError:
+            yield event.plain_result("❌ 选项编号必须是数字")
+            return
+
+        ok, msg = self.store.vote(
+            poll_id, option_idx,
+            event.get_sender_id(),
+            event.get_sender_name(),
+        )
+        if ok:
+            poll = self.store.get_poll(poll_id)
+            if poll:
+                yield event.plain_result(
+                    f"✅ {msg}\n\n当前结果:\n{self.store.format_result(poll)}"
+                )
+            else:
+                yield event.plain_result(f"✅ {msg}")
+        else:
+            yield event.plain_result(f"❌ {msg}")
 
     @filter.command("投票")
     async def poll_cn(self, event: AstrMessageEvent):
-        """中文命令别名"""
+        """中文命令: /投票 等同于 /poll"""
         text = event.message_str.strip()
-        event.message_str = text.replace("投票", "poll", 1)
+        after = text[3:].strip()
+        if not after:
+            yield event.plain_result("📊 投票管理器\n输入 /投票 help 查看帮助")
+            return
+
+        event.message_str = f"/poll {after}"
+        async for result in self.poll(event):
+            yield result
