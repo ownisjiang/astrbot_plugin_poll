@@ -178,7 +178,7 @@ class PollStore:
     def format_result(self, poll: dict) -> str:
         total = sum(len(o["votes"]) for o in poll["options"])
         lines = [
-            f"📊 {poll['question']}",
+            f"📊 投票 #{poll.get('id', '?')}: {poll['question']}",
             f"{'【多选】' if poll.get('multi') else '【单选】'} "
             f"{'🔒匿名' if poll.get('anonymous') else '👤公开'} "
             f"👥 {total} 票",
