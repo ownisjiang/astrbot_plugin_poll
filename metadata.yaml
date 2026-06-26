@@ -10,5 +10,5 @@ support_platforms:
   - discord
   - aiocqhttp
   - qq_official
-  - wechat
+  - wecom
 astrbot_version: ">=4.16,<5"

@@ -38,6 +38,7 @@ from astrbot.api import logger
 
 # ── 持久化存储 ──────────────────────────────────────────────
 
+
 class PollStore:
     """投票数据的持久化存储"""
 
@@ -128,7 +129,9 @@ class PollStore:
             polls.append(poll)
         return sorted(polls, key=lambda p: p["id"], reverse=True)
 
-    async def vote(self, poll_id: str, option_index: int, user_id: str, user_name: str) -> tuple[bool, str]:
+    async def vote(
+        self, poll_id: str, option_index: int, user_id: str, user_name: str
+    ) -> tuple[bool, str]:
         async with self._lock:
             poll = self._data["polls"].get(poll_id)
             if not poll:
@@ -150,11 +153,13 @@ class PollStore:
                 for opt in poll["options"]:
                     opt["votes"] = [v for v in opt["votes"] if v["user_id"] != user_id]
 
-            option["votes"].append({
-                "user_id": user_id,
-                "user_name": user_name,
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-            })
+            option["votes"].append(
+                {
+                    "user_id": user_id,
+                    "user_name": user_name,
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                }
+            )
             poll["total_votes"] = sum(len(o["votes"]) for o in poll["options"])
             await self._save()
         return True, f"投票成功！你选择了: {option['text']}"
@@ -207,7 +212,10 @@ class PollStore:
 
 # ── 插件主类 ──────────────────────────────────────────────
 
-@register("astrbot_plugin_poll", "ownisjiang", "投票插件 - 在聊天中创建和参与投票", "1.0.0")
+
+@register(
+    "astrbot_plugin_poll", "ownisjiang", "投票插件 - 在聊天中创建和参与投票", "1.0.0"
+)
 class PollPlugin(Star):
     def __init__(self, context: Context, config: dict = None):
         super().__init__(context)
@@ -215,7 +223,11 @@ class PollPlugin(Star):
 
         data_dir = os.path.join(
             os.path.dirname(os.path.abspath(__file__)),
-            "..", "..", "..", "data", "poll_plugin"
+            "..",
+            "..",
+            "..",
+            "data",
+            "poll_plugin",
         )
         self.store = PollStore(data_dir)
         self._expiry_check_task: Optional[asyncio.Task] = None
@@ -257,7 +269,7 @@ class PollPlugin(Star):
                 "📊 PollStar 投票插件\n"
                 "━━━━━━━━━━━━━━━━\n"
                 "命令:\n"
-                "  /poll create \"问题\" \"选项1\" \"选项2\" ...  创建投票\n"
+                '  /poll create "问题" "选项1" "选项2" ...  创建投票\n'
                 "  /poll vote <id> <编号>                    参与投票\n"
                 "  /poll result <id>                         查看结果\n"
                 "  /poll list                                当前投票列表\n"
@@ -267,9 +279,9 @@ class PollPlugin(Star):
                 "  --anon     匿名投票\n"
                 "  --time N   截止时间（N 分钟后）\n\n"
                 "示例:\n"
-                "  /poll create \"今晚吃什么?\" \"火锅\" \"烤肉\" \"炒菜\"\n"
-                "  /poll create \"选组长\" \"小明\" \"小红\" --anon\n"
-                "  /poll create \"周末去哪\" \"海边\" \"爬山\" \"露营\" --time 60\n"
+                '  /poll create "今晚吃什么?" "火锅" "烤肉" "炒菜"\n'
+                '  /poll create "选组长" "小明" "小红" --anon\n'
+                '  /poll create "周末去哪" "海边" "爬山" "露营" --time 60\n'
                 "  /poll vote 1 2"
             )
 
@@ -302,11 +314,11 @@ class PollPlugin(Star):
         text = event.message_str.strip()
 
         # 解析参数标记（使用单词边界匹配更准确）
-        multi = bool(re.search(r'(?:^|\s)--(?:multi|多选)(?:\s|$)', text))
-        anonymous = bool(re.search(r'(?:^|\s)--(?:anon|匿名)(?:\s|$)', text))
+        multi = bool(re.search(r"(?:^|\s)--(?:multi|多选)(?:\s|$)", text))
+        anonymous = bool(re.search(r"(?:^|\s)--(?:anon|匿名)(?:\s|$)", text))
         expiry = None
 
-        time_match = re.search(r'(?:^|\s)--time\s+(\d+)(?:\s|$)', text)
+        time_match = re.search(r"(?:^|\s)--time\s+(\d+)(?:\s|$)", text)
         if time_match:
             try:
                 expiry = int(time_match.group(1))
@@ -315,11 +327,8 @@ class PollPlugin(Star):
                 return
 
         # 安全清理参数标记（只替换完整单词，不破坏选项内的文字）
-        clean = re.sub(
-            r'(?:^|\s)--(?:multi|多选|anon|匿名)(?=\s|$)',
-            '', text
-        )
-        clean = re.sub(r'(?:^|\s)--time\s+\d+(?=\s|$)', '', clean)
+        clean = re.sub(r"(?:^|\s)--(?:multi|多选|anon|匿名)(?=\s|$)", "", text)
+        clean = re.sub(r"(?:^|\s)--time\s+\d+(?=\s|$)", "", clean)
         clean = clean.strip()
 
         # 解析引号内的内容
@@ -333,8 +342,8 @@ class PollPlugin(Star):
             else:
                 yield event.plain_result(
                     "❌ 格式错误！\n"
-                    "用法: /poll create \"问题\" \"选项1\" \"选项2\" ...\n"
-                    "示例: /poll create \"今晚吃什么?\" \"火锅\" \"烤肉\" \"炒菜\""
+                    '用法: /poll create "问题" "选项1" "选项2" ...\n'
+                    '示例: /poll create "今晚吃什么?" "火锅" "烤肉" "炒菜"'
                 )
                 return
         else:
@@ -410,8 +419,7 @@ class PollPlugin(Star):
             poll = self.store.get_poll(poll_id)
             if poll:
                 yield event.plain_result(
-                    f"✅ {msg}\n\n"
-                    f"当前结果:\n{self.store.format_result(poll)}"
+                    f"✅ {msg}\n\n当前结果:\n{self.store.format_result(poll)}"
                 )
             else:
                 yield event.plain_result(f"✅ {msg}")
@@ -446,7 +454,7 @@ class PollPlugin(Star):
             if p.get("expiry"):
                 remaining = p["expiry"] - self.store._utcnow_ts()
                 if remaining > 0:
-                    expiry = f" ⏱{int(remaining/60)}分钟"
+                    expiry = f" ⏱{int(remaining / 60)}分钟"
 
             lines.append(
                 f"  🆔 {p['id']} | {p['question'][:30]}\n"
@@ -495,7 +503,8 @@ class PollPlugin(Star):
             return
 
         ok, msg = await self.store.vote(
-            poll_id, option_idx,
+            poll_id,
+            option_idx,
             event.get_sender_id(),
             event.get_sender_name(),
         )
