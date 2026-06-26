@@ -214,7 +214,7 @@ class PollStore:
 
 
 @register(
-    "astrbot_plugin_poll", "ownisjiang", "投票插件 - 在聊天中创建和参与投票", "1.0.0"
+    "astrbot_plugin_poll", "ownisjiang", "投票插件 - 在聊天中创建和参与投票", "1.0"
 )
 class PollPlugin(Star):
     def __init__(self, context: Context, config: dict = None):
