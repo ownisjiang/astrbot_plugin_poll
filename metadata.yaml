@@ -1,7 +1,7 @@
 name: astrbot_plugin_poll
 author: ownisjiang
 desc: 在聊天中创建投票、参与投票、查看结果，支持单选/多选、匿名投票、定时截止
-version: "1.0"
+version: "1.0.0"
 display_name: "📊 PollStar 投票"
 short_desc: 在聊天中创建和参与投票，支持单选/多选和匿名
 repo: https://github.com/ownisjiang/astrbot_plugin_poll
